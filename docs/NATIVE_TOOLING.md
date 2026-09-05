@@ -102,8 +102,11 @@ its file origin. Using the GOT offset can appear to work for a small program,
 then produce a loader rejection after adding imports or static data because the
 section layout changes.
 
-The converter anchors RELRO to `.data.rel.ro` and fails the host build if any
-mapped `PT_LOAD` violates the 16 KiB congruence rule. This validation belongs in
+The converter anchors RELRO to its first section, which is `.data.rel.ro`
+whenever lld keeps that section and otherwise the GOT or an initializer array
+(a program without relocated read-only data has no `.data.rel.ro` at all), and
+fails the host build if any mapped `PT_LOAD` violates the 16 KiB congruence
+rule. This validation belongs in
 the writer rather than in application code because the failure occurs before
 `main()` and is independent of the imported API's runtime behavior.
 

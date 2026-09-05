@@ -163,8 +163,11 @@ class ToolTests(unittest.TestCase):
         source = (ROOT / "tooling/native/sce_module_writer.cpp").read_text(
             encoding="utf-8"
         )
-        self.assertIn('section(image, ".data.rel.ro")', source)
-        self.assertIn("relro_source.address == relro_start", source)
+        # RELRO is anchored at its first section: .data.rel.ro whenever lld
+        # keeps it, otherwise the GOT, so a program without relocated
+        # read-only data still converts.
+        self.assertIn("relro_origin(image, relro_start)", source)
+        self.assertIn('if (input.name == ".data.rel.ro")', source)
         self.assertIn("relro_source.file_offset", source)
         self.assertIn(
             "header.offset % header.alignment == header.address % header.alignment",

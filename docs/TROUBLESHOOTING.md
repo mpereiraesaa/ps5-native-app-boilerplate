@@ -60,11 +60,14 @@ observed firmware 12.02 folder deployment this presented as launch result
 
 Check every mapped `PT_LOAD` in the generated `eboot.elf`: its file offset and
 virtual address must have the same residue modulo `0x4000`. In particular,
-RELRO starts at `.data.rel.ro`, not `.got`. An older writer used the GOT file
-offset and could silently generate an incongruent segment when the binary
-layout changed.
+RELRO starts at its first section, which is `.data.rel.ro` whenever the
+program has relocated read-only data, not at `.got`. An older writer used the
+GOT file offset and could silently generate an incongruent segment when the
+binary layout changed.
 
-Current tooling anchors the RELRO file offset to `.data.rel.ro` and rejects an
+Current tooling anchors the RELRO file offset to the section that begins the
+region (`.data.rel.ro` when lld keeps it, otherwise the GOT, since lld drops the
+empty section in programs such as the Hello World template) and rejects an
 incongruent load during the host build. Rebuild `ps5-native-tool` after updating
 `tooling/native/sce_module_writer.cpp`; reusing an older binary preserves the
 bug even when the source is fixed. This issue concerns ELF layout, not network
