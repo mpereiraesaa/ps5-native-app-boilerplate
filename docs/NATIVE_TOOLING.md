@@ -10,9 +10,12 @@ solve: C/C++ compilation, archives, COMDAT, symbol resolution, TLS, unwind
 records, and x86-64 relocations. The repository-owned converter handles only
 PS5-specific output requirements:
 
-- FreeBSD OS ABI 9, ABI version 2, and executable type `0xFE10`;
+- FreeBSD OS ABI 9, ABI version 2, executable type `0xFE10`, and dynamic
+  module type `0xFE18`;
 - execute-only, read-only, RELRO, writable, and flags-zero linking segments;
-- process-parameter and parameter-block records;
+- process-parameter and parameter-block records for executables, and the
+  module-parameter record for modules;
+- NID exports for application-owned modules (see `MODULES.md`);
 - SDK import discovery from the installed public `.so` stubs;
 - PS5 NIDs, module/library IDs, SysV hash, and dynamic tags;
 - development FSELF wrapping and integrity metadata.
@@ -37,7 +40,8 @@ the build no longer depends on a changing distribution package.
 | `tooling/native/app-symbols.map` | Keeps replacement allocation operators internal to the application |
 | `tooling/native/ps5-pie.ld` | Non-overlapping intermediate PIE layout |
 | `tooling/native/elf_object.*` | ELF and SDK-stub reader |
-| `tooling/native/sce_module_writer.*` | PS5 executable converter |
+| `tooling/native/sce_module_writer.*` | PS5 executable and dynamic-module converter |
+| `tools/build-module.sh` | Builds `modules/<name>/` into a signed module plus its import stub |
 | `tooling/native/self_container.*` | FSELF reader, writer, and verifier |
 | `tooling/native/libc_builder.cpp` | Deterministic clean-room runtime emitter |
 | `tooling/native/hash.hpp` | Project-owned SHA-1/SHA-256 implementation |
@@ -85,6 +89,8 @@ plus attribution, JSON, shell-syntax, local-path, and whitespace checks.
 
 ```text
 ps5-native-tool link --in <llvm-pie> --out <ps5-elf> --stub-dir <sdk-lib>
+ps5-native-tool link --module --in <llvm-shared> --out <ps5-module> --file-name <name>.prx \
+    [--module-name <name>] [--export-library <name>] --stub-dir <sdk-lib> [--stub <so>...]
 ps5-native-tool self --sign --in <ps5-elf> --out <fself>
 ps5-native-tool self --extract --file <fself> --out <ps5-elf>
 ps5-native-tool self --inspect --file <module>

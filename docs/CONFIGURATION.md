@@ -80,7 +80,9 @@ The generated `runtime/libc.prx` is always included and verified against
 `runtime/libc.prx.sha256`. Additional local PRXs may be placed under the ignored
 `.local/runtime/` directory and selected with `APP_RUNTIME_MODULES`; the build
 copies pre-signed modules and wraps raw ELF modules. Duplicate filenames are
-rejected.
+rejected. `tools/build-module.sh <name>` produces such a module from
+`modules/<name>/` together with the import stub selected by
+`APP_IMPORT_STUBS`.
 
 Packaged read-only data belongs under `assets/` and appears at `/app0/assets/`.
 
@@ -94,6 +96,7 @@ Build-only choices use Make variables rather than application metadata:
 | `APP_INCLUDE_PATHS` | Repository-relative include directories. |
 | `APP_STATIC_ARCHIVES` | Repository-relative `.a` files in linker order. |
 | `APP_RUNTIME_MODULES` | PRX paths below the ignored `.local/runtime/` directory. |
+| `APP_IMPORT_STUBS` | Import stubs below the ignored `.local/stubs/` directory, produced by `tools/build-module.sh`; the application links against them and imports their exports by NID (see `MODULES.md`). |
 | `PACBREW_PACKAGES` | PacBrew `pkg-config` module names. |
 | `PACBREW_INCLUDE_PATHS` | Paths below PacBrew's `/user/homebrew`. |
 | `PACBREW_STATIC_ARCHIVES` | PacBrew `.a` paths below `/user/homebrew`. |

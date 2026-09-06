@@ -381,6 +381,7 @@ tests/                        Host-native C++ unit and tooling integration tests
 | [PacBrew dependencies](docs/PACBREW.md) | Third-party PS5 libraries, selection, caching, and limits |
 | [Build output formats](docs/FFPKG.md) | Folder, `.ffpkg`, and `.ffpfsc` generation |
 | [Native build tooling](docs/NATIVE_TOOLING.md) | LLVM boundary and C++ converter/FSELF commands |
+| [Dynamic modules](docs/MODULES.md) | Application-owned PRX modules: build, exports, import stubs, validation status |
 | [Clean-room runtime shim](docs/RUNTIME_SHIM.md) | Design, hashes, compatibility, and deterministic reproduction |
 | [Deployment](docs/DEPLOYMENT.md) | FTP staging, title-scoped cleanup, and smoke testing |
 | [Platform constraints](docs/PLATFORM_NOTES.md) | Loader, filesystem, presentation, and capability boundaries |
