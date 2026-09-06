@@ -1,0 +1,22 @@
+/*
+ * ps5-native-app-boilerplate - Export policy for the hello sample module.
+ * Copyright (C) 2026 BlackBearReloaded
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Only the listed symbols become loader-visible NID exports; everything else
+ * stays module-local. lld rejects a global that the module does not define,
+ * so every name here must exist in the sources.
+ */
+
+{
+    global:
+        hello_add;
+        hello_sleep_and_count;
+        hello_version;
+        hello_started;
+        hello_stopped;
+        module_start;
+        module_stop;
+    local:
+        *;
+};

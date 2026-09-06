@@ -112,12 +112,24 @@ archives=()
 pacbrew_packages=()
 pacbrew_includes=()
 pacbrew_archives=()
+import_stubs=()
 [[ -z ${APP_DEFINITIONS:-} ]] || read -r -a definitions <<< "$APP_DEFINITIONS"
 [[ -z ${APP_INCLUDE_PATHS:-} ]] || read -r -a includes <<< "$APP_INCLUDE_PATHS"
 [[ -z ${APP_STATIC_ARCHIVES:-} ]] || read -r -a archives <<< "$APP_STATIC_ARCHIVES"
 [[ -z ${PACBREW_PACKAGES:-} ]] || read -r -a pacbrew_packages <<< "$PACBREW_PACKAGES"
 [[ -z ${PACBREW_INCLUDE_PATHS:-} ]] || read -r -a pacbrew_includes <<< "$PACBREW_INCLUDE_PATHS"
 [[ -z ${PACBREW_STATIC_ARCHIVES:-} ]] || read -r -a pacbrew_archives <<< "$PACBREW_STATIC_ARCHIVES"
+[[ -z ${APP_IMPORT_STUBS:-} ]] || read -r -a import_stubs <<< "$APP_IMPORT_STUBS"
+# Import stubs are the lld shared objects produced by tools/build-module.sh.
+# The application links against them so its imports resolve to the packaged
+# module by SONAME, exactly like the public SDK stubs describe system modules.
+stub_arguments=()
+for stub in "${import_stubs[@]}"; do
+    [[ $stub =~ ^\.local/stubs/[A-Za-z0-9._-]+\.so$ && -f $root/$stub ]] || {
+        echo "invalid import stub: $stub" >&2; exit 2;
+    }
+    stub_arguments+=(--stub "$root/$stub")
+done
 
 pacbrew_cflags=()
 pacbrew_libs=()
@@ -199,9 +211,9 @@ fi
 "$sdk_root/bin/prospero-lld" -T "$native/ps5-pie.ld" --eh-frame-hdr \
     --version-script "$native/app-symbols.map" \
     -e _start -o "$build/llvm-pie.elf" "${link_inputs[@]}" \
-    --as-needed "$sdk_root"/target/lib/*.so
+    --as-needed "$sdk_root"/target/lib/*.so "${import_stubs[@]/#/$root/}"
 "$tool" link --in "$build/llvm-pie.elf" --out "$build/eboot.elf" \
-    --stub-dir "$sdk_root/target/lib" --module-sdk "$module_sdk" \
+    --stub-dir "$sdk_root/target/lib" "${stub_arguments[@]}" --module-sdk "$module_sdk" \
     --companion-sdk "$companion_sdk" --file-name eboot.elf
 
 app="$dist/$title_id"
