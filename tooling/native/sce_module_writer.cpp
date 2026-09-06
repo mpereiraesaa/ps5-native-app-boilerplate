@@ -1102,6 +1102,7 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
     const Section *eh_header = optional_section(image, ".eh_frame_hdr");
     require(text.executable() && text.address == 0 && text.file_offset >= kPage,
             "LLVM text layout is incompatible with the PS5 converter");
+    require(got.allocated(), "LLVM-linked module has no allocated GOT");
     require(!options.file_name.empty(), "module file name cannot be empty");
     const std::string module_name =
         options.module_name.empty() ? strip_extension(options.file_name) : options.module_name;
@@ -1177,8 +1178,19 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
 
     const Bytes module_parameters =
         build_module_parameters(options.module_sdk, options.companion_sdk);
-    const std::uint64_t parameter_address =
+    // The loader treats DT_PLTGOT as a table with three reserved entries and
+    // writes its link map and resolver into entries 1 and 2. lld only emits
+    // .got.plt when a PLT exists; with -fno-plt the GOT may hold a single
+    // entry, so anything placed right behind it (the module parameters) would
+    // be overwritten before the loader validates them. Reserve the table.
+    const Section *got_plt = optional_section(image, ".got.plt");
+    const bool own_plt_got = got_plt == nullptr || got_plt->size < 3 * 8;
+    std::uint64_t cursor =
         align_up(std::max(relro_content_end, ro_end > relro_start ? ro_end : 0), 8);
+    const std::uint64_t plt_got_address = own_plt_got ? cursor : got_plt->address;
+    if (own_plt_got)
+        cursor += 3 * 8;
+    const std::uint64_t parameter_address = cursor;
     const std::uint64_t relro_end = parameter_address + module_parameters.size();
     require(relro_end <= data_start, "LLVM layout leaves no room for PS5 module parameters");
 
@@ -1323,7 +1335,7 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
     layout.hash_size = hash.size();
     layout.jump_relocations = jump_address;
     layout.jump_relocations_size = rela_plt.size();
-    layout.got = got.address;
+    layout.got = plt_got_address;
     layout.relocations = relocation_address;
     layout.relocations_size = rela_dynamic.size();
     layout.relative_count = relative_count;
@@ -1335,6 +1347,19 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
     layout.fini_array_size = dynamic_value(dynamic_source, kDynamicFiniArraySize);
     layout.init = dynamic_value(dynamic_source, kDynamicInit);
     layout.fini = dynamic_value(dynamic_source, kDynamicFini);
+    // The loader runs the module's start routine at e_entry and treats a
+    // non-zero return as a start failure; it also invokes DT_INIT/DT_FINI
+    // relative to the base even when lld left them zero. The layout script
+    // starts .text with 16 bytes of int3 filler, so that filler becomes a
+    // `xor eax, eax; ret` stub: it serves as the empty initializer target and
+    // as the start routine when the module exports no module_start.
+    require(text.data.size() >= 16 && std::all_of(text.data.begin(), text.data.begin() + 16,
+                                                  [](std::uint8_t byte) { return byte == 0xcc; }),
+            "module .text does not start with the layout script's filler");
+    std::uint64_t entry = 0;
+    for (const Export &item : exports)
+        if (image.dynamic_symbols[item.dynamic_symbol].name == "module_start")
+            entry = image.dynamic_symbols[item.dynamic_symbol].value;
     const Bytes dynamic = build_module_dynamic(modules, libraries, layout);
     const std::uint64_t dynamic_end = dynamic_address + dynamic.size();
 
@@ -1364,8 +1389,19 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
             continue;
         copy_bytes(output, input.file_offset, input.data);
     }
+    output[text.file_offset] = 0x31; /* xor eax, eax */
+    output[text.file_offset + 1] = 0xc0;
+    output[text.file_offset + 2] = 0xc3; /* ret */
     const Section &relro_source = relro_origin(image, relro_start);
     const std::uint64_t relro_file = relro_source.file_offset;
+    if (own_plt_got)
+    {
+        // Entry 0 conventionally holds the dynamic table address; the loader
+        // owns entries 1 and 2.
+        Bytes plt_got(3 * 8);
+        write_u64(plt_got, 0, dynamic_address);
+        copy_bytes(output, relro_file + plt_got_address - relro_start, plt_got);
+    }
     copy_bytes(output, relro_file + parameter_address - relro_start, module_parameters);
     copy_bytes(output, dynamic_file_at(string_address), dynamic_strings);
     copy_bytes(output, dynamic_file_at(symbol_address), dynamic_symbols);
@@ -1378,9 +1414,9 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
     copy_bytes(output, version_file, version);
     copy_bytes(output, tail_file, tail_note);
 
-    // A module has no process entry point; initializers run through DT_INIT
-    // and the init array, and module_start is an ordinary export if present.
-    write_elf_header(output, 0, kTypeDynamicModule);
+    // e_entry is the start routine the loader calls: module_start when the
+    // module exports it, otherwise the returning stub at the module base.
+    write_elf_header(output, entry, kTypeDynamicModule);
     const std::uint64_t ro_file =
         eh_header != nullptr ? eh_header->file_offset : section(image, ".eh_frame").file_offset;
     const std::uint64_t data_file = dynamic_source.file_offset;

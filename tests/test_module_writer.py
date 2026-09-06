@@ -36,6 +36,7 @@ DT_RELASZ = 8
 DT_SONAME = 14
 DT_JMPREL = 23
 DT_PLTRELSZ = 2
+DT_PLTGOT = 3
 DT_RELACOUNT = 0x6FFFFFF9
 DT_SCE_MODULE_ATTR = 0x61000011
 DT_SCE_EXPORT_LIB_ATTR = 0x61000017
@@ -280,7 +281,11 @@ class ModuleWriterTests(unittest.TestCase):
     def test_module_has_loader_visible_identity(self):
         module = ElfModule(self._convert(self.shared))
         self.assertEqual(module.e_type, ET_SCE_DYNAMIC)
+        # No module_start export: the entry is the zero-returning stub at the
+        # module base, which the loader calls as the start routine.
         self.assertEqual(module.entry, 0)
+        text = next(phdr for phdr in module.phdrs if phdr["type"] == PT_LOAD and phdr["flags"] == 1)
+        self.assertEqual(module.data[text["offset"]:text["offset"] + 3], bytes.fromhex("31c0c3"))
         types = [phdr["type"] for phdr in module.phdrs]
         self.assertIn(PT_SCE_MODULE_PARAM, types)
         self.assertNotIn(PT_SCE_PROCPARAM, types)
@@ -294,6 +299,13 @@ class ModuleWriterTests(unittest.TestCase):
         relro = next(phdr for phdr in module.phdrs if phdr["type"] == PT_LOAD and
                      phdr["vaddr"] <= param["vaddr"] < phdr["vaddr"] + phdr["memsz"])
         self.assertEqual(relro["flags"], 6, "module parameters live in the RELRO load")
+        # The loader writes entries 1 and 2 of the PLT GOT; the table must be
+        # a reserved 3-entry block that ends where the module parameters begin.
+        pltgot = module.tag(DT_PLTGOT)[0]
+        self.assertTrue(relro["vaddr"] <= pltgot < relro["vaddr"] + relro["memsz"])
+        self.assertEqual(param["vaddr"], pltgot + 3 * 8)
+        self.assertEqual(struct.unpack_from("<Q", module.data, module.file_offset(pltgot))[0],
+                         next(phdr for phdr in module.phdrs if phdr["type"] == PT_DYNAMIC)["vaddr"])
         for phdr in module.phdrs:
             if phdr["type"] == PT_LOAD and phdr["flags"] != 0:
                 self.assertEqual(phdr["offset"] % 0x4000, phdr["vaddr"] % 0x4000)
@@ -373,6 +385,15 @@ class ModuleWriterTests(unittest.TestCase):
                                    inputs=[self.stub])
         error = self._convert(shared, expect_failure=True)
         self.assertIn("publishes no global symbols", error)
+
+    def test_entry_points_at_exported_module_start(self):
+        source = MODULE_SOURCE + "int module_start(unsigned long argc, const void *argv) { (void)argc; (void)argv; return 0; }\n"
+        exports = "{ global: hello_add; hello_sleep; hello_version; module_start; local: *; };\n"
+        shared = self._link_shared("libstart", source, "libhello.prx", exports=exports, inputs=[self.stub])
+        module = ElfModule(self._convert(shared))
+        expected = ElfSharedObject(shared.read_bytes()).dynamic_symbols["module_start"]["value"]
+        self.assertNotEqual(expected, 0)
+        self.assertEqual(module.entry, expected)
 
     def test_module_name_and_export_library_options(self):
         module = ElfModule(self._convert(self.shared, "--module-name", "libSceHello",
