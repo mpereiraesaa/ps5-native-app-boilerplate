@@ -42,6 +42,7 @@ the build no longer depends on a changing distribution package.
 | `tooling/native/elf_object.*` | ELF and SDK-stub reader |
 | `tooling/native/sce_module_writer.*` | PS5 executable and dynamic-module converter |
 | `tools/build-module.sh` | Builds `modules/<name>/` into a signed module plus its import stub |
+| `modules/prx_loader.h` | Single-header export descriptor and runtime loader shared by modules and applications |
 | `tooling/native/self_container.*` | FSELF reader, writer, and verifier |
 | `tooling/native/libc_builder.cpp` | Deterministic clean-room runtime emitter |
 | `tooling/native/hash.hpp` | Project-owned SHA-1/SHA-256 implementation |

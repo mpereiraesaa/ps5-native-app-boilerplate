@@ -114,6 +114,40 @@ Two further observations shape how modules are consumed:
   the descriptor are valid after the loader's RELATIVE relocations. This is
   the resolution path validated on hardware.
 
+## Loading a module from the application: `modules/prx_loader.h`
+
+`modules/prx_loader.h` is a single-header library shared by both sides. A
+module declares its exports once:
+
+```c
+#include "prx_loader.h"
+PRX_DEFINE_DESCRIPTOR(hello_exports, PRX_EXPORT(hello_add), PRX_EXPORT(hello_version));
+```
+
+The host defines `PRX_LOADER_IMPLEMENTATION` and `PRX_LOADER_NATIVE` in one
+translation unit and uses:
+
+```c
+prx_module module;
+if (prx_load(&module, "/app0/sce_module/hello.prx", prx_native_ops()) == PRX_OK) {
+    int (*add)(int, int) = (int (*)(int, int))prx_get_proc(&module, "hello_add");
+    /* ... */
+    prx_unload(&module, prx_native_ops());
+}
+```
+
+`prx_load` calls `sceKernelLoadStartModule`, reads the module's segments with
+`sceKernelGetModuleInfo`, scans the readable segments at 16-byte steps for the
+descriptor magic and validates the candidate: version, a bounded export count,
+and every name and address inside the module's own segments. A module that
+loads but carries no valid descriptor is unloaded again before the error is
+returned, so the caller never holds a half-initialised handle. The kernel
+calls are injected through `prx_loader_ops`; `tests/test_prx_loader.c`
+exercises the scan, the rejection paths, the module-info parser and the
+load/unload sequence against fakes, and `make test-integration` runs it with
+and without `NDEBUG`. Applications include the header with
+`APP_INCLUDE_PATHS=modules`.
+
 ## Relocation policy
 
 A module may only carry dynamic relocations that reference imported symbols

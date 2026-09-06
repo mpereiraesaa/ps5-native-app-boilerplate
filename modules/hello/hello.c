@@ -3,10 +3,12 @@
  * Copyright (C) 2026 BlackBearReloaded
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Exports two functions and one variable, imports one kernel call, and keeps
- * private state, so a hardware run can prove export resolution, module-local
- * data, and system imports from inside a packaged PRX.
+ * Exports functions and data through a prx_loader.h descriptor, imports one
+ * kernel call, and keeps private state, so a hardware run can prove export
+ * resolution, module-local data, and system imports from inside a packaged PRX.
  */
+
+#include "prx_loader.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -54,37 +56,12 @@ typedef struct hello_api
     const uint32_t *stopped;
 } hello_api;
 
-/* Static, relocated descriptor the host finds by scanning the module's
- * segments (sceKernelGetModuleInfo) for the magic. It needs neither kernel
- * symbol lookup nor module_start arguments: the loader's RELATIVE relocations
- * make every pointer valid once the module is mapped. */
-typedef struct hello_export
-{
-    const char *name;
-    const void *address;
-} hello_export;
-
-typedef struct hello_descriptor
-{
-    uint64_t magic;   /* "PRXDESC1" */
-    uint32_t version; /* descriptor layout version */
-    uint32_t count;
-    hello_export exports[6];
-} hello_descriptor;
-
-__attribute__((used, aligned(16))) const hello_descriptor hello_exports = {
-    0x3143534544585250ull, /* 'P','R','X','D','E','S','C','1' little-endian */
-    1u,
-    6u,
-    {
-        {"hello_add", (const void *)&hello_add},
-        {"hello_sleep_and_count", (const void *)&hello_sleep_and_count},
-        {"hello_version", &hello_version},
-        {"hello_started", &hello_started},
-        {"hello_stopped", &hello_stopped},
-        {"module_start", (const void *)&module_start},
-    },
-};
+/* Export descriptor the host locates through prx_loader.h: neither kernel
+ * symbol lookup nor module_start arguments are involved, and the loader's
+ * RELATIVE relocations make every pointer valid once the module is mapped. */
+PRX_DEFINE_DESCRIPTOR(hello_exports, PRX_EXPORT(hello_add), PRX_EXPORT(hello_sleep_and_count),
+                      PRX_EXPORT(hello_version), PRX_EXPORT(hello_started),
+                      PRX_EXPORT(hello_stopped), PRX_EXPORT(module_start));
 
 int module_start(size_t argc, const void *argv)
 {

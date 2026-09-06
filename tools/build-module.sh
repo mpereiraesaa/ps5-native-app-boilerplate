@@ -58,7 +58,7 @@ for source in "${sources[@]}"; do
     # symbols locally so no dynamic relocation refers to an export.
     PS5_PAYLOAD_SDK="$sdk_root" sh "$root/tooling/prospero-clang18" \
         -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
-        -ffunction-sections -fdata-sections \
+        -ffunction-sections -fdata-sections -I"$root/modules" \
         -c "$source" -o "$object"
     objects+=("$object")
 done
