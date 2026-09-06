@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Converts an ordinary PIE produced by LLVM lld into the loader-visible PS5
- * executable shape. LLVM remains responsible for C/C++ linking, archives,
- * COMDAT, TLS, unwind data, and ordinary x86-64 relocations.
+ * executable shape, and an lld shared object into a PS5 dynamic module with
+ * NID exports. LLVM remains responsible for C/C++ linking, archives, COMDAT,
+ * TLS, unwind data, and ordinary x86-64 relocations.
  */
 
 #include "sce_module_writer.hpp"
@@ -35,11 +36,13 @@ using elf::Stub;
 
 constexpr std::uint64_t kPage = 0x4000;
 constexpr std::uint16_t kTypeDynamicExecutable = 0xfe10;
+constexpr std::uint16_t kTypeDynamicModule = 0xfe18;
 constexpr std::uint32_t kProgramLoad = 1;
 constexpr std::uint32_t kProgramDynamic = 2;
 constexpr std::uint32_t kProgramNote = 4;
 constexpr std::uint32_t kProgramTls = 7;
 constexpr std::uint32_t kProgramProcParam = 0x61000001;
+constexpr std::uint32_t kProgramModuleParam = 0x61000002;
 constexpr std::uint32_t kProgramGnuEhFrame = 0x6474e550;
 constexpr std::uint32_t kProgramGnuRelro = 0x6474e552;
 constexpr std::uint32_t kProgramComment = 0x6fffff00;
@@ -61,6 +64,7 @@ constexpr std::int64_t kDynamicStringSize = 10;
 constexpr std::int64_t kDynamicSymbolEntry = 11;
 constexpr std::int64_t kDynamicInit = 12;
 constexpr std::int64_t kDynamicFini = 13;
+constexpr std::int64_t kDynamicSoname = 14;
 constexpr std::int64_t kDynamicPltRel = 20;
 constexpr std::int64_t kDynamicDebug = 21;
 constexpr std::int64_t kDynamicJumpRela = 23;
@@ -72,14 +76,24 @@ constexpr std::int64_t kDynamicPreinitArray = 32;
 constexpr std::int64_t kDynamicPreinitArraySize = 33;
 constexpr std::int64_t kDynamicRelaCount = 0x6ffffff9;
 constexpr std::int64_t kDynamicModuleAttributes = 0x61000011;
+constexpr std::int64_t kDynamicExportLibraryAttributes = 0x61000017;
 constexpr std::int64_t kDynamicImportLibraryAttributes = 0x61000019;
 constexpr std::int64_t kDynamicHashSize = 0x6100003d;
 constexpr std::int64_t kDynamicSymbolTableSize = 0x6100003f;
 constexpr std::int64_t kDynamicOriginalFilename = 0x61000041;
 constexpr std::int64_t kDynamicModuleInfo = 0x61000043;
 constexpr std::int64_t kDynamicNeededModule = 0x61000045;
+constexpr std::int64_t kDynamicExportLibrary = 0x61000047;
 constexpr std::int64_t kDynamicImportLibrary = 0x61000049;
+constexpr std::uint32_t kRel64 = 1;
+constexpr std::uint32_t kRelGlobData = 6;
+constexpr std::uint32_t kRelJumpSlot = 7;
 constexpr std::uint32_t kRelRelative = 8;
+constexpr std::uint32_t kRelDtpMod64 = 16;
+constexpr std::uint32_t kRelDtpOff64 = 17;
+constexpr std::uint32_t kRelTpOff64 = 18;
+constexpr std::uint32_t kModuleParamMagic = 0x3c13f4bf;
+constexpr std::uint64_t kModuleParamSize = 0x20;
 
 void require(bool condition, const std::string &message)
 {
@@ -421,6 +435,18 @@ const Section &relro_origin(const Image &image, std::uint64_t relro_start)
     return *origin;
 }
 
+Bytes build_module_parameters(std::uint32_t module_sdk, std::uint32_t companion_sdk)
+{
+    Bytes output(kModuleParamSize);
+    write_u64(output, 0, kModuleParamSize);
+    write_u32(output, 0x08, kModuleParamMagic);
+    write_u32(output, 0x0c, 3);
+    write_u32(output, 0x10, companion_sdk);
+    write_u32(output, 0x14, module_sdk);
+    write_u32(output, 0x18, 1);
+    return output;
+}
+
 struct Import
 {
     std::string plain;
@@ -589,7 +615,7 @@ void write_program_header(std::span<std::uint8_t> output, std::size_t index,
     write_u64(output, at + 48, header.alignment);
 }
 
-void write_elf_header(std::span<std::uint8_t> output, std::uint64_t entry)
+void write_elf_header(std::span<std::uint8_t> output, std::uint64_t entry, std::uint16_t type)
 {
     require(output.size() >= kPage, "output cannot hold ELF header");
     output[0] = 0x7f;
@@ -601,7 +627,7 @@ void write_elf_header(std::span<std::uint8_t> output, std::uint64_t entry)
     output[6] = 1;
     output[7] = 9;
     output[8] = 2;
-    write_u16(output, 0x10, kTypeDynamicExecutable);
+    write_u16(output, 0x10, type);
     write_u16(output, 0x12, 0x3e);
     write_u32(output, 0x14, 1);
     write_u64(output, 0x18, entry);
@@ -875,7 +901,7 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
     copy_bytes(output, version_file, version);
     copy_bytes(output, tail_file, tail_note);
 
-    write_elf_header(output, image.entry);
+    write_elf_header(output, image.entry, kTypeDynamicExecutable);
     const std::uint64_t ro_file =
         eh_header != nullptr ? eh_header->file_offset : section(image, ".eh_frame").file_offset;
     const std::uint64_t data_file = dynamic_source.file_offset;
@@ -896,6 +922,485 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
          data_end - data_start, kPage},
         {kProgramProcParam, kFlagRead, relro_file + process_address - relro_start, process_address,
          process_parameters.size(), process_parameters.size(), 8},
+        {kProgramDynamic, kFlagRead | kFlagWrite, dynamic_file_at(dynamic_address), dynamic_address,
+         dynamic.size(), dynamic.size(), 8},
+        {kProgramTls, kFlagRead, tls_start == 0 ? relro_file : tls_file,
+         tls_start == 0 ? relro_start : tls_start, tls_start == 0 ? 0 : tls_file_end - tls_start,
+         tls_start == 0 ? 0 : tls_memory_end - tls_start, tls_start == 0 ? 1 : tls_alignment},
+        {kProgramGnuEhFrame, kFlagRead, eh_file, eh_address, eh_size, eh_size, 4},
+        {kProgramLoad, 0, dynamic_file, dynamic_base, dynamic_end - dynamic_base,
+         dynamic_end - dynamic_base, kPage},
+        {kProgramComment, 0, comment_file, 0, comment.size(), 0, 0x10},
+        {kProgramVersion, 0, version_file, 0, version.size(), version.size(), 1},
+        {kProgramNote, 0, dynamic_file_at(note_address), note_address, note.size(), note.size(), 4},
+        {kProgramNote, 0, tail_file, 0, tail_note.size(), 0, 4},
+    }};
+    for (const ProgramHeader &header : headers)
+    {
+        if (header.type != kProgramLoad || header.flags == 0)
+            continue;
+        require(header.alignment != 0 &&
+                    header.offset % header.alignment == header.address % header.alignment,
+                "mapped LOAD has incongruent file offset and address");
+    }
+    for (std::size_t i = 0; i < headers.size(); ++i)
+        write_program_header(output, i, headers[i]);
+
+    const auto build_id = crypto::sha1(output);
+    std::copy(build_id.begin(), build_id.begin() + 16,
+              output.begin() + dynamic_file_at(note_address) + 16);
+    std::copy(build_id.begin(), build_id.begin() + 8, output.begin() + tail_file + 16);
+    return output;
+}
+
+namespace
+{
+
+struct ModuleDynamicLayout
+{
+    std::uint32_t soname{};
+    std::uint32_t module_info_name{};
+    std::uint32_t original_file_name{};
+    std::uint32_t export_library_name{};
+    int export_library_id{};
+    std::uint64_t symbol_table{};
+    std::uint64_t symbol_table_size{};
+    std::uint64_t string_table{};
+    std::uint64_t string_size{};
+    std::uint64_t hash_table{};
+    std::uint64_t hash_size{};
+    std::uint64_t jump_relocations{};
+    std::uint64_t jump_relocations_size{};
+    std::uint64_t got{};
+    std::uint64_t relocations{};
+    std::uint64_t relocations_size{};
+    std::uint64_t relative_count{};
+    std::uint64_t preinit{};
+    std::uint64_t preinit_size{};
+    std::uint64_t init_array{};
+    std::uint64_t init_array_size{};
+    std::uint64_t fini_array{};
+    std::uint64_t fini_array_size{};
+    std::uint64_t init{};
+    std::uint64_t fini{};
+};
+
+// Module dynamic table. The tag order follows the hardware-validated runtime
+// module emitted by libc_builder: imports, identity, exports, then the
+// standard relocation, symbol, string, hash, and initializer records.
+Bytes build_module_dynamic(std::span<const ModuleRecord> modules,
+                           std::span<const LibraryRecord> libraries,
+                           const ModuleDynamicLayout &layout)
+{
+    std::vector<std::pair<std::int64_t, std::uint64_t>> entries;
+    for (const ModuleRecord &module : modules)
+    {
+        add_dynamic(entries, kDynamicNeeded, module.soname);
+        add_dynamic(entries, kDynamicNeededModule,
+                    module.module_name | (std::uint64_t{0x0101} << 32) |
+                        (static_cast<std::uint64_t>(module.id) << 48));
+        for (const LibraryRecord &library : libraries)
+        {
+            if (library.module_id != module.id)
+                continue;
+            add_dynamic(entries, kDynamicImportLibrary,
+                        library.name | (std::uint64_t{1} << 32) |
+                            (static_cast<std::uint64_t>(library.id) << 48));
+            add_dynamic(entries, kDynamicImportLibraryAttributes,
+                        (static_cast<std::uint64_t>(library.id) << 48) | 9);
+        }
+    }
+    add_dynamic(entries, kDynamicSoname, layout.soname);
+    add_dynamic(entries, kDynamicModuleInfo,
+                layout.module_info_name | (std::uint64_t{0x0101} << 32));
+    add_dynamic(entries, kDynamicModuleAttributes, 0);
+    add_dynamic(entries, kDynamicOriginalFilename, layout.original_file_name);
+    add_dynamic(entries, kDynamicExportLibrary,
+                layout.export_library_name | (std::uint64_t{1} << 32) |
+                    (static_cast<std::uint64_t>(layout.export_library_id) << 48));
+    add_dynamic(entries, kDynamicExportLibraryAttributes,
+                (static_cast<std::uint64_t>(layout.export_library_id) << 48) | 1);
+    add_dynamic(entries, kDynamicRela, layout.relocations);
+    add_dynamic(entries, kDynamicRelaSize, layout.relocations_size);
+    add_dynamic(entries, kDynamicRelaEntry, 24);
+    add_dynamic(entries, kDynamicRelaCount, layout.relative_count);
+    add_dynamic(entries, kDynamicJumpRela, layout.jump_relocations);
+    add_dynamic(entries, kDynamicPltRelSize, layout.jump_relocations_size);
+    add_dynamic(entries, kDynamicPltGot, layout.got);
+    add_dynamic(entries, kDynamicPltRel, kDynamicRela);
+    add_dynamic(entries, kDynamicSymbolTable, layout.symbol_table);
+    add_dynamic(entries, kDynamicSymbolEntry, 24);
+    add_dynamic(entries, kDynamicStringTable, layout.string_table);
+    add_dynamic(entries, kDynamicStringSize, layout.string_size);
+    add_dynamic(entries, kDynamicHash, layout.hash_table);
+    add_dynamic(entries, kDynamicPreinitArray, layout.preinit);
+    add_dynamic(entries, kDynamicPreinitArraySize, layout.preinit_size);
+    add_dynamic(entries, kDynamicInitArray, layout.init_array);
+    add_dynamic(entries, kDynamicInitArraySize, layout.init_array_size);
+    add_dynamic(entries, kDynamicFiniArray, layout.fini_array);
+    add_dynamic(entries, kDynamicFiniArraySize, layout.fini_array_size);
+    add_dynamic(entries, kDynamicInit, layout.init);
+    add_dynamic(entries, kDynamicFini, layout.fini);
+    add_dynamic(entries, kDynamicSymbolTableSize, layout.symbol_table_size);
+    add_dynamic(entries, kDynamicHashSize, layout.hash_size);
+    add_dynamic(entries, 0, 0);
+    Bytes output(entries.size() * 16);
+    for (std::size_t i = 0; i < entries.size(); ++i)
+    {
+        write_u64(output, i * 16, static_cast<std::uint64_t>(entries[i].first));
+        write_u64(output, i * 16 + 8, entries[i].second);
+    }
+    return output;
+}
+
+std::string strip_extension(std::string name)
+{
+    const std::size_t slash = name.find_last_of("/\\");
+    if (slash != std::string::npos)
+        name.erase(0, slash + 1);
+    if (const std::size_t dot = name.find_last_of('.'); dot != std::string::npos && dot != 0)
+        name.resize(dot);
+    return name;
+}
+
+// A dynamic relocation may only reference an imported symbol. A reference to
+// one of the module's own exports means the object was linked without
+// -Bsymbolic; resolving it through the loader would depend on export-lookup
+// semantics this converter does not model.
+void require_import_relocation(const Image &image, const DynamicRelocation &relocation,
+                               std::string_view table)
+{
+    const auto type = static_cast<std::uint32_t>(relocation.info);
+    const auto symbol_index = static_cast<std::size_t>(relocation.info >> 32);
+    if (type == kRelRelative)
+        return;
+    require(type != kRelTpOff64, "module uses initial-exec TLS; only general-dynamic TLS is "
+                                 "supported inside a PS5 module");
+    if (type == kRelDtpMod64 || type == kRelDtpOff64)
+    {
+        require(symbol_index == 0 || (symbol_index < image.dynamic_symbols.size() &&
+                                      image.dynamic_symbols[symbol_index].undefined()),
+                "module TLS relocation references its own symbol; link with -Bsymbolic");
+        return;
+    }
+    require(type == kRel64 || type == kRelGlobData || type == kRelJumpSlot,
+            "module has an unsupported dynamic relocation type in " + std::string{table});
+    require(symbol_index != 0 && symbol_index < image.dynamic_symbols.size(),
+            "module dynamic relocation has an invalid symbol index in " + std::string{table});
+    const elf::Symbol &symbol = image.dynamic_symbols[symbol_index];
+    require(symbol.undefined(), "module references its own exported symbol " + symbol.name +
+                                    " through a dynamic relocation; link with -Bsymbolic");
+}
+
+} // namespace
+
+Bytes write_module(const Image &image, std::span<const Stub> stubs, const ModuleOptions &options)
+{
+    const Section &text = section(image, ".text");
+    const Section &dynamic_source = section(image, ".dynamic");
+    const Section &got = section(image, ".got");
+    const Section *eh_header = optional_section(image, ".eh_frame_hdr");
+    require(text.executable() && text.address == 0 && text.file_offset >= kPage,
+            "LLVM text layout is incompatible with the PS5 converter");
+    require(!options.file_name.empty(), "module file name cannot be empty");
+    const std::string module_name =
+        options.module_name.empty() ? strip_extension(options.file_name) : options.module_name;
+    const std::string export_library =
+        options.export_library.empty() ? module_name : options.export_library;
+    require(!module_name.empty(), "module name cannot be empty");
+
+    std::uint64_t copied_file_end = kPage;
+    for (const Section &input : image.sections)
+    {
+        if (!input.allocated() || input.no_bits())
+            continue;
+        copied_file_end = std::max(copied_file_end, input.file_offset + input.data.size());
+    }
+
+    std::uint64_t text_end = text.address + text.size;
+    std::uint64_t ro_start = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t ro_end = 0;
+    std::uint64_t relro_start = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t relro_content_end = 0;
+    std::uint64_t data_start = dynamic_source.address;
+    std::uint64_t data_end = data_start + 8;
+    std::uint64_t data_stored_end = data_start + 8;
+    std::uint64_t tls_start = 0;
+    std::uint64_t tls_file_end = 0;
+    std::uint64_t tls_memory_end = 0;
+    std::uint64_t tls_alignment = 0x20;
+
+    for (const Section &input : image.sections)
+    {
+        if (!input.allocated() || input.name == ".dynamic")
+            continue;
+        const std::uint64_t end = input.address + input.size;
+        if (input.executable())
+        {
+            text_end = std::max(text_end, end);
+        }
+        else if (input.tls())
+        {
+            if (tls_start == 0)
+                tls_start = input.address;
+            tls_start = std::min(tls_start, input.address);
+            tls_memory_end = std::max(tls_memory_end, end);
+            if (!input.no_bits())
+                tls_file_end = std::max(tls_file_end, end);
+            tls_alignment = std::max(tls_alignment, input.alignment);
+        }
+        else if (relro_section(input.name))
+        {
+            relro_start = std::min(relro_start, input.address);
+            relro_content_end = std::max(relro_content_end, end);
+        }
+        else if (input.writable() || input.no_bits())
+        {
+            data_start = std::min(data_start, input.address);
+            data_end = std::max(data_end, end);
+            if (!input.no_bits())
+                data_stored_end = std::max(data_stored_end, end);
+        }
+        else if (!metadata_section(input.name))
+        {
+            ro_start = std::min(ro_start, input.address);
+            ro_end = std::max(ro_end, end);
+        }
+    }
+    require(relro_start != std::numeric_limits<std::uint64_t>::max(),
+            "LLVM-linked module has no GOT/RELRO region");
+    if (ro_start == std::numeric_limits<std::uint64_t>::max())
+    {
+        ro_start = align_up(text_end, kPage);
+        ro_end = ro_start;
+    }
+
+    const Bytes module_parameters =
+        build_module_parameters(options.module_sdk, options.companion_sdk);
+    const std::uint64_t parameter_address =
+        align_up(std::max(relro_content_end, ro_end > relro_start ? ro_end : 0), 8);
+    const std::uint64_t relro_end = parameter_address + module_parameters.size();
+    require(relro_end <= data_start, "LLVM layout leaves no room for PS5 module parameters");
+
+    std::vector<Import> imports;
+    std::vector<const Stub *> module_order;
+    for (const std::string &needed : image.needed)
+    {
+        const auto provider = std::find_if(stubs.begin(), stubs.end(), [&](const Stub &candidate)
+                                           { return candidate.soname == needed; });
+        require(provider != stubs.end(), "public SDK stub directory lacks needed module " + needed);
+        module_order.push_back(&*provider);
+    }
+    struct Export
+    {
+        std::uint32_t dynamic_symbol{};
+        std::string mangled;
+    };
+    std::vector<Export> exports;
+    for (std::size_t i = 1; i < image.dynamic_symbols.size(); ++i)
+    {
+        const elf::Symbol &symbol = image.dynamic_symbols[i];
+        if (!symbol.undefined())
+        {
+            require(symbol.global_or_weak() && !symbol.name.empty(),
+                    "module dynamic symbol table has an unexpected local entry");
+            const int type = symbol.type();
+            require(type == elf::kTypeFunction || type == elf::kTypeObject ||
+                        type == elf::kTypeNoType || type == elf::kTypeTls,
+                    "module export " + symbol.name + " has an unsupported symbol type");
+            exports.push_back({static_cast<std::uint32_t>(i), {}});
+            continue;
+        }
+        const Stub *provider = nullptr;
+        for (const Stub *candidate : module_order)
+        {
+            if (std::find(candidate->exports.begin(), candidate->exports.end(), symbol.name) !=
+                candidate->exports.end())
+            {
+                provider = candidate;
+                break;
+            }
+        }
+        require(provider != nullptr, "no public SDK stub exports required symbol " + symbol.name);
+        imports.push_back({symbol.name, provider, 0, 0, static_cast<std::uint32_t>(i), {}});
+    }
+    require(!exports.empty(), "module publishes no global symbols; check the version script");
+
+    std::vector<ModuleRecord> modules;
+    std::vector<LibraryRecord> libraries;
+    StringTable strings;
+    for (std::size_t i = 0; i < module_order.size(); ++i)
+    {
+        const Stub *provider = module_order[i];
+        modules.push_back({static_cast<int>(i + 1), strings.add(provider->soname),
+                           strings.add(provider->module_name)});
+        libraries.push_back(
+            {static_cast<int>(i), static_cast<int>(i + 1), strings.add(provider->library_name)});
+    }
+    for (Import &import : imports)
+    {
+        const auto module = std::find(module_order.begin(), module_order.end(), import.provider);
+        require(module != module_order.end(), "internal import provider error");
+        const int index = static_cast<int>(module - module_order.begin());
+        import.module_id = index + 1;
+        import.library_id = index;
+        import.mangled = nid(import.plain) + "#" + encode_id(import.library_id) + "#" +
+                         encode_id(import.module_id);
+    }
+    // The module's own export library takes the next library id; the module
+    // itself is module id 0, exactly as the runtime shim publishes libc.
+    const int export_library_id = static_cast<int>(module_order.size());
+    for (Export &entry : exports)
+        entry.mangled = nid(image.dynamic_symbols[entry.dynamic_symbol].name) + "#" +
+                        encode_id(export_library_id) + "#" + encode_id(0);
+
+    ModuleDynamicLayout layout;
+    layout.soname = strings.add(options.file_name);
+    layout.original_file_name = layout.soname;
+    layout.module_info_name = strings.add(module_name);
+    layout.export_library_name = strings.add(export_library);
+    layout.export_library_id = export_library_id;
+
+    Bytes dynamic_symbols(image.dynamic_symbols.size() * 24);
+    std::vector<std::string> hash_names(image.dynamic_symbols.size());
+    const auto emit_symbol = [&](std::uint32_t index, const std::string &mangled, bool defined)
+    {
+        const elf::Symbol &source = image.dynamic_symbols[index];
+        const std::size_t at = static_cast<std::size_t>(index) * 24;
+        write_u32(dynamic_symbols, at, strings.add(mangled));
+        dynamic_symbols[at + 4] = source.info;
+        dynamic_symbols[at + 5] = source.other;
+        write_u16(dynamic_symbols, at + 6, defined ? source.section : 0);
+        write_u64(dynamic_symbols, at + 8, defined ? source.value : 0);
+        write_u64(dynamic_symbols, at + 16, defined ? source.size : 0);
+        // The loader resolves exports by hashing the encoded NID name, so the
+        // SysV table hashes exactly the strings stored in .dynstr.
+        hash_names[index] = mangled;
+    };
+    for (const Import &import : imports)
+        emit_symbol(import.dynamic_symbol, import.mangled, false);
+    for (const Export &entry : exports)
+        emit_symbol(entry.dynamic_symbol, entry.mangled, true);
+    const Bytes dynamic_strings = strings.data();
+    const Bytes hash = build_sysv_hash(hash_names);
+
+    std::vector<DynamicRelocation> source_relocations =
+        read_relocations(optional_section(image, ".rela.dyn"));
+    std::vector<DynamicRelocation> relocations;
+    std::vector<DynamicRelocation> symbolic;
+    for (const DynamicRelocation &relocation : source_relocations)
+    {
+        require_import_relocation(image, relocation, ".rela.dyn");
+        if (static_cast<std::uint32_t>(relocation.info) == kRelRelative)
+            relocations.push_back(relocation);
+        else
+            symbolic.push_back(relocation);
+    }
+    const std::size_t relative_count = relocations.size();
+    relocations.insert(relocations.end(), symbolic.begin(), symbolic.end());
+    const Bytes rela_dynamic = write_relocations(relocations);
+    const Section *source_plt = optional_section(image, ".rela.plt");
+    for (const DynamicRelocation &relocation : read_relocations(source_plt))
+        require_import_relocation(image, relocation, ".rela.plt");
+    const Bytes rela_plt = source_plt == nullptr ? Bytes{} : source_plt->data;
+    const Bytes note = build_note();
+
+    data_end = std::max(data_end, data_start + 8);
+    const std::uint64_t dynamic_base = align_up(data_end, 16);
+    const std::uint64_t string_address = dynamic_base;
+    const std::uint64_t symbol_address = align_up(string_address + dynamic_strings.size(), 8);
+    const std::uint64_t jump_address = align_up(symbol_address + dynamic_symbols.size(), 8);
+    const std::uint64_t relocation_address = align_up(jump_address + rela_plt.size(), 8);
+    const std::uint64_t hash_address = align_up(relocation_address + rela_dynamic.size(), 8);
+    const std::uint64_t note_address = align_up(hash_address + hash.size(), 4);
+    const std::uint64_t dynamic_address = align_up(note_address + note.size(), 8);
+
+    layout.symbol_table = symbol_address;
+    layout.symbol_table_size = dynamic_symbols.size();
+    layout.string_table = string_address;
+    layout.string_size = dynamic_strings.size();
+    layout.hash_table = hash_address;
+    layout.hash_size = hash.size();
+    layout.jump_relocations = jump_address;
+    layout.jump_relocations_size = rela_plt.size();
+    layout.got = got.address;
+    layout.relocations = relocation_address;
+    layout.relocations_size = rela_dynamic.size();
+    layout.relative_count = relative_count;
+    layout.preinit = dynamic_value(dynamic_source, kDynamicPreinitArray);
+    layout.preinit_size = dynamic_value(dynamic_source, kDynamicPreinitArraySize);
+    layout.init_array = dynamic_value(dynamic_source, kDynamicInitArray);
+    layout.init_array_size = dynamic_value(dynamic_source, kDynamicInitArraySize);
+    layout.fini_array = dynamic_value(dynamic_source, kDynamicFiniArray);
+    layout.fini_array_size = dynamic_value(dynamic_source, kDynamicFiniArraySize);
+    layout.init = dynamic_value(dynamic_source, kDynamicInit);
+    layout.fini = dynamic_value(dynamic_source, kDynamicFini);
+    const Bytes dynamic = build_module_dynamic(modules, libraries, layout);
+    const std::uint64_t dynamic_end = dynamic_address + dynamic.size();
+
+    std::vector<std::string> components = options.version_components;
+    if (components.empty())
+    {
+        components.push_back(module_name);
+        for (const Stub *provider : module_order)
+            components.push_back(provider->soname);
+    }
+    const Bytes comment = build_comment(options.file_name);
+    const Bytes version = build_version(components, options.module_sdk);
+    const Bytes tail_note = build_tail_note();
+
+    const std::uint64_t dynamic_file = congruent_offset(copied_file_end, dynamic_base);
+    const auto dynamic_file_at = [&](std::uint64_t address)
+    { return dynamic_file + (address - dynamic_base); };
+    const std::uint64_t comment_file = align_up(dynamic_file_at(dynamic_end), 8);
+    const std::uint64_t version_file = align_up(comment_file + comment.size(), 4);
+    const std::uint64_t tail_file = align_up(version_file + version.size(), 4);
+    Bytes output(tail_file + tail_note.size());
+
+    for (const Section &input : image.sections)
+    {
+        if (!input.allocated() || input.no_bits() || metadata_section(input.name) ||
+            input.name == ".dynamic")
+            continue;
+        copy_bytes(output, input.file_offset, input.data);
+    }
+    const Section &relro_source = relro_origin(image, relro_start);
+    const std::uint64_t relro_file = relro_source.file_offset;
+    copy_bytes(output, relro_file + parameter_address - relro_start, module_parameters);
+    copy_bytes(output, dynamic_file_at(string_address), dynamic_strings);
+    copy_bytes(output, dynamic_file_at(symbol_address), dynamic_symbols);
+    copy_bytes(output, dynamic_file_at(jump_address), rela_plt);
+    copy_bytes(output, dynamic_file_at(relocation_address), rela_dynamic);
+    copy_bytes(output, dynamic_file_at(hash_address), hash);
+    copy_bytes(output, dynamic_file_at(note_address), note);
+    copy_bytes(output, dynamic_file_at(dynamic_address), dynamic);
+    copy_bytes(output, comment_file, comment);
+    copy_bytes(output, version_file, version);
+    copy_bytes(output, tail_file, tail_note);
+
+    // A module has no process entry point; initializers run through DT_INIT
+    // and the init array, and module_start is an ordinary export if present.
+    write_elf_header(output, 0, kTypeDynamicModule);
+    const std::uint64_t ro_file =
+        eh_header != nullptr ? eh_header->file_offset : section(image, ".eh_frame").file_offset;
+    const std::uint64_t data_file = dynamic_source.file_offset;
+    const std::uint64_t data_file_size = std::max<std::uint64_t>(8, data_stored_end - data_start);
+    const std::uint64_t tls_file = tls_start == 0 ? relro_file + (relro_end - relro_start)
+                                                  : relro_file + (tls_start - relro_start);
+    const std::uint64_t eh_address = eh_header == nullptr ? ro_start : eh_header->address;
+    const std::uint64_t eh_file = eh_header == nullptr ? ro_file : eh_header->file_offset;
+    const std::uint64_t eh_size = eh_header == nullptr ? 0 : eh_header->size;
+    const std::array<ProgramHeader, 14> headers = {{
+        {kProgramLoad, kFlagExecute, text.file_offset, 0, text_end, text_end, kPage},
+        {kProgramLoad, kFlagRead, ro_file, ro_start, ro_end - ro_start, ro_end - ro_start, kPage},
+        {kProgramLoad, kFlagRead | kFlagWrite, relro_file, relro_start, relro_end - relro_start,
+         relro_end - relro_start, kPage},
+        {kProgramGnuRelro, kFlagRead, relro_file, relro_start, relro_end - relro_start,
+         align_up(relro_end - relro_start, kPage), 1},
+        {kProgramLoad, kFlagRead | kFlagWrite, data_file, data_start, data_file_size,
+         data_end - data_start, kPage},
+        {kProgramModuleParam, kFlagRead, relro_file + parameter_address - relro_start,
+         parameter_address, module_parameters.size(), module_parameters.size(), 8},
         {kProgramDynamic, kFlagRead | kFlagWrite, dynamic_file_at(dynamic_address), dynamic_address,
          dynamic.size(), dynamic.size(), 8},
         {kProgramTls, kFlagRead, tls_start == 0 ? relro_file : tls_file,

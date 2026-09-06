@@ -5,7 +5,8 @@
  *
  * Provides C++ implementations of the repository's host-side build steps.
  * Handles deterministic FSELF containers and converts LLVM-linked PIE files
- * into PS5 dynamic executables without a managed-code toolchain.
+ * into PS5 dynamic executables, and LLVM-linked shared objects into PS5
+ * dynamic modules, without a managed-code toolchain.
  */
 
 #include "hash.hpp"
@@ -257,17 +258,37 @@ int link_command(std::span<char *> args)
     if (stubs.empty())
         throw std::runtime_error("link requires at least one --stub");
 
-    ps5::module::Options link_options;
-    if (const auto value = option(args, "--file-name"))
-        link_options.file_name = *value;
-    if (const auto value = option(args, "--module-sdk"))
-        link_options.module_sdk = static_cast<std::uint32_t>(parse_integer(*value));
-    if (const auto value = option(args, "--companion-sdk"))
-        link_options.companion_sdk = static_cast<std::uint32_t>(parse_integer(*value));
-    for (std::string_view value : options(args, "--component"))
-        link_options.version_components.emplace_back(value);
-
-    const Bytes output = ps5::module::write_executable(image, stubs, link_options);
+    Bytes output;
+    if (has_flag(args, "--module"))
+    {
+        ps5::module::ModuleOptions module_options;
+        if (const auto value = option(args, "--file-name"))
+            module_options.file_name = *value;
+        if (const auto value = option(args, "--module-name"))
+            module_options.module_name = *value;
+        if (const auto value = option(args, "--export-library"))
+            module_options.export_library = *value;
+        if (const auto value = option(args, "--module-sdk"))
+            module_options.module_sdk = static_cast<std::uint32_t>(parse_integer(*value));
+        if (const auto value = option(args, "--companion-sdk"))
+            module_options.companion_sdk = static_cast<std::uint32_t>(parse_integer(*value));
+        for (std::string_view value : options(args, "--component"))
+            module_options.version_components.emplace_back(value);
+        output = ps5::module::write_module(image, stubs, module_options);
+    }
+    else
+    {
+        ps5::module::Options link_options;
+        if (const auto value = option(args, "--file-name"))
+            link_options.file_name = *value;
+        if (const auto value = option(args, "--module-sdk"))
+            link_options.module_sdk = static_cast<std::uint32_t>(parse_integer(*value));
+        if (const auto value = option(args, "--companion-sdk"))
+            link_options.companion_sdk = static_cast<std::uint32_t>(parse_integer(*value));
+        for (std::string_view value : options(args, "--component"))
+            link_options.version_components.emplace_back(value);
+        output = ps5::module::write_executable(image, stubs, link_options);
+    }
     const auto path = std::filesystem::absolute(std::filesystem::path{std::string{*output_name}});
     write_file(path, output);
     std::cout << "wrote " << output.size() << " bytes: " << path.string() << '\n'
@@ -282,7 +303,10 @@ void usage()
               << "  ps5-native-tool self --extract --file <fself> --out <elf>\n"
               << "  ps5-native-tool self --inspect --file <module>\n"
               << "  ps5-native-tool link --in <llvm-pie> --out <ps5-elf>"
-                 " (--stub <sdk-so>... | --stub-dir <sdk-lib>)\n";
+                 " (--stub <sdk-so>... | --stub-dir <sdk-lib>)\n"
+              << "  ps5-native-tool link --module --in <llvm-shared> --out <ps5-module>"
+                 " --file-name <name>.prx [--module-name <name>]"
+                 " [--export-library <name>] (--stub ... | --stub-dir ...)\n";
 }
 
 } // namespace
