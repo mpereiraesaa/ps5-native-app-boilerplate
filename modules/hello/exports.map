@@ -15,6 +15,7 @@
         hello_version;
         hello_started;
         hello_stopped;
+        hello_exports;
         module_start;
         module_stop;
     local:

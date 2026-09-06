@@ -79,6 +79,41 @@ The default export-library name equals the module name so that the stub reader
 in `elf_object.cpp`, which derives an import library name from a SONAME,
 produces the same `NID#lib#module` identity on the importing side.
 
+## Loader contracts learned on hardware
+
+Two facts about the FW 12.02 loader were established with `sceKernelLoadStartModule`
+on real hardware and are now enforced by the converter:
+
+- **`DT_PLTGOT` is a three-entry table.** The loader writes its link map and
+  resolver into entries 1 and 2 regardless of whether the module has a PLT.
+  lld emits `.got.plt` only when a PLT exists, so a `-fno-plt` module can end
+  up with a one-entry GOT and the module parameters directly behind it. The
+  loader then corrupts the parameters before validating them and reports
+  `0x80020063` (SDK version). The converter reserves its own table inside the
+  RELRO load, places the module parameters after it, and points `DT_PLTGOT`
+  at the table.
+- **`e_entry` is the module's start routine and must return 0.** The loader
+  calls it after mapping; a non-zero return makes the load fail with
+  `0x80020016`. The layout script's `int3` filler at the base becomes a
+  `xor eax, eax; ret` stub; `e_entry` is the exported `module_start` when
+  present and the stub otherwise. Empty `DT_INIT`/`DT_FINI` also resolve to
+  the stub.
+
+Two further observations shape how modules are consumed:
+
+- The process loader does **not** load an application-owned PRX named in
+  `DT_NEEDED`; only the platform-known `sce_module` entries such as
+  `libc.prx` are picked up at start and unknown imports stay unbound (zero).
+  Application modules are loaded at runtime.
+- `sceKernelDlsym` returns `0x80020003` for every application-owned module,
+  including the runtime shim, whatever the hash table contents, and the
+  loader does not invoke `module_start` through symbol lookup either. The
+  sample therefore publishes a static, relocated **export descriptor**
+  (`hello_exports`, magic `PRXDESC1`) that a host finds by scanning the
+  module segments reported by `sceKernelGetModuleInfo`. Function pointers in
+  the descriptor are valid after the loader's RELATIVE relocations. This is
+  the resolution path validated on hardware.
+
 ## Relocation policy
 
 A module may only carry dynamic relocations that reference imported symbols
@@ -106,8 +141,9 @@ Host-validated: conversion, signing, inspection, and the application-side
 import stub path. The module shape follows the runtime shim that the loader
 accepts on firmware 6.02 and 12.70.
 
-Not yet validated on hardware: an application importing a packaged module at
-load time, runtime `sceKernelLoadStartModule`/`sceKernelDlsym` of a packaged
-module, and whether the loader invokes `module_start`. The `modules/hello`
-sample exposes `hello_started`/`hello_stopped` data exports so a hardware run
-can answer the last question without guessing.
+Validated on FW 12.02 (2026-09-06): `sceKernelLoadStartModule` of the packaged
+sample from `/app0/sce_module/`, resolution of its exports through the
+descriptor, calls into module code including a kernel import from inside the
+module, and `sceKernelStopUnloadModule`. Not available on this firmware for
+application modules: load-time `DT_NEEDED` binding, `sceKernelDlsym`, and
+`module_start` invocation by the loader (`e_entry` is called instead).
