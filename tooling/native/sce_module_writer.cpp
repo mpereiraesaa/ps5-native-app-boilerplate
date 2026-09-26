@@ -1293,6 +1293,17 @@ Bytes write_module(const Image &image, std::span<const Stub> stubs, const Module
         emit_symbol(import.dynamic_symbol, import.mangled, false);
     for (const Export &entry : exports)
         emit_symbol(entry.dynamic_symbol, entry.mangled, true);
+    // The loader hashes "NID#<library name>#<module name>", as for
+    // executables, not the letter-encoded string stored in .dynstr
+    // (measured on FW 12.02: run-time loaded modules only bound exports
+    // that the letter hash placed in the right bucket by chance).
+    for (const Import &import : imports)
+        hash_names[import.dynamic_symbol] = nid(import.plain) + "#" +
+                                            import.provider->library_name + "#" +
+                                            import.provider->module_name;
+    for (const Export &entry : exports)
+        hash_names[entry.dynamic_symbol] = nid(image.dynamic_symbols[entry.dynamic_symbol].name) +
+                                           "#" + export_library + "#" + module_name;
     const Bytes dynamic_strings = strings.data();
     const Bytes hash = build_sysv_hash(hash_names);
 
