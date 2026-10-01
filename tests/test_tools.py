@@ -172,6 +172,18 @@ class ToolTests(unittest.TestCase):
         )
         self.assertNotIn("const std::uint64_t relro_file = got.file_offset", source)
 
+    def test_native_writer_preserves_high_text_address(self):
+        source = (ROOT / "tooling/native/sce_module_writer.cpp").read_text(
+            encoding="utf-8"
+        )
+        high_layout = (ROOT / "tooling/native/ps5-pie-high.ld").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(".text 0x100000000 :", high_layout)
+        self.assertIn("text.address % kPage == 0", source)
+        self.assertIn("text.file_offset, text.address,", source)
+        self.assertIn("text_end - text.address", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -605,7 +605,7 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
     const Section &dynamic_source = section(image, ".dynamic");
     const Section &got = section(image, ".got");
     const Section *eh_header = optional_section(image, ".eh_frame_hdr");
-    require(text.executable() && text.address == 0 && text.file_offset >= kPage,
+    require(text.executable() && text.address % kPage == 0 && text.file_offset >= kPage,
             "LLVM text layout is incompatible with the PS5 converter");
 
     std::uint64_t copied_file_end = kPage;
@@ -867,7 +867,8 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
     const std::uint64_t eh_file = eh_header == nullptr ? ro_file : eh_header->file_offset;
     const std::uint64_t eh_size = eh_header == nullptr ? 0 : eh_header->size;
     const std::array<ProgramHeader, 14> headers = {{
-        {kProgramLoad, kFlagExecute, text.file_offset, 0, text_end, text_end, kPage},
+        {kProgramLoad, kFlagExecute, text.file_offset, text.address,
+         text_end - text.address, text_end - text.address, kPage},
         {kProgramLoad, kFlagRead, ro_file, ro_start, ro_end - ro_start, ro_end - ro_start, kPage},
         {kProgramLoad, kFlagRead | kFlagWrite, relro_file, relro_start, relro_end - relro_start,
          relro_end - relro_start, kPage},
