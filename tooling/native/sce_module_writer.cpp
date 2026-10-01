@@ -605,7 +605,7 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
     const Section &dynamic_source = section(image, ".dynamic");
     const Section &got = section(image, ".got");
     const Section *eh_header = optional_section(image, ".eh_frame_hdr");
-    require(text.executable() && text.address == 0 && text.file_offset >= kPage,
+    require(text.executable() && text.address % kPage == 0 && text.file_offset >= kPage,
             "LLVM text layout is incompatible with the PS5 converter");
 
     std::uint64_t copied_file_end = kPage;
@@ -838,7 +838,11 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
             continue;
         copy_bytes(output, input.file_offset, input.data);
     }
-    const std::uint64_t relro_file = got.file_offset;
+    // A mapped LOAD must preserve the address/file-offset residue at the
+    // hardware 16 KiB page size. The GOT is inside RELRO, not its beginning.
+    const Section &relro_source = section(image, ".data.rel.ro");
+    require(relro_source.address == relro_start, "RELRO mapping must begin at .data.rel.ro");
+    const std::uint64_t relro_file = relro_source.file_offset;
     copy_bytes(output, relro_file + process_address - relro_start, process_parameters);
     copy_bytes(output, relro_file + blocks_address - relro_start, blocks.data);
     copy_bytes(output, dynamic_file_at(string_address), dynamic_strings);
@@ -863,7 +867,8 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
     const std::uint64_t eh_file = eh_header == nullptr ? ro_file : eh_header->file_offset;
     const std::uint64_t eh_size = eh_header == nullptr ? 0 : eh_header->size;
     const std::array<ProgramHeader, 14> headers = {{
-        {kProgramLoad, kFlagExecute, text.file_offset, 0, text_end, text_end, kPage},
+        {kProgramLoad, kFlagExecute, text.file_offset, text.address,
+         text_end - text.address, text_end - text.address, kPage},
         {kProgramLoad, kFlagRead, ro_file, ro_start, ro_end - ro_start, ro_end - ro_start, kPage},
         {kProgramLoad, kFlagRead | kFlagWrite, relro_file, relro_start, relro_end - relro_start,
          relro_end - relro_start, kPage},
@@ -886,6 +891,14 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
         {kProgramNote, 0, dynamic_file_at(note_address), note_address, note.size(), note.size(), 4},
         {kProgramNote, 0, tail_file, 0, tail_note.size(), 0, 4},
     }};
+    for (const ProgramHeader &header : headers)
+    {
+        if (header.type != kProgramLoad || header.flags == 0)
+            continue;
+        require(header.alignment != 0 &&
+                    header.offset % header.alignment == header.address % header.alignment,
+                "mapped LOAD has incongruent file offset and address");
+    }
     for (std::size_t i = 0; i < headers.size(); ++i)
         write_program_header(output, i, headers[i]);
 
